@@ -8,18 +8,33 @@ export type MediaTarget = {
 	kind: MediaKind;
 };
 
+export type EyeBox = {
+	x: number;
+	y: number;
+	// the template is square, so one side covers it
+	size: number;
+};
+
 export type EyeMatch = {
 	templateName: string;
 	score: number;
 	frameIndex: number;
 	correlation: number;
 	colorDistance: number;
+	// where the emoji sits, in pixels of the original media
+	bbox: EyeBox;
+	sourceWidth: number;
+	sourceHeight: number;
+	// the decoded frame the match is in (at most 720px, packed RGB), only
+	// when the task asked for it with includeFrame
+	frame?: { width: number; height: number; rgb: Buffer };
 };
 
 export type DetectionTask = {
 	bytes: Buffer;
 	mediaKind: MediaKind;
 	sourceLabel: string;
+	includeFrame?: boolean;
 };
 
 export function getEvenlySpacedTimestamps(

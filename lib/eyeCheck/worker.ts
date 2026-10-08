@@ -1,27 +1,57 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import sharp from "sharp";
+import { type DecodedMedia, type RgbFrame, decodeMedia } from "./decode.ts";
 import {
 	type DetectionTask,
 	type EyeMatch,
 	type MediaKind,
 	EYES_DETECTION_THRESHOLD,
 	MAX_VIDEO_FRAMES,
-	getEvenlySpacedTimestamps,
 } from "./types.ts";
+import { MAX_NEIGHBOURHOOD, NeighbourhoodScanner } from "./wasmVerify.ts";
+import {
+	HOG_CELL,
+	type HogModel,
+	computeHog,
+	luminancePlane,
+	modelFromVector,
+	rgbToLuminance,
+	scoreWindows,
+} from "./hog.ts";
 
 const REFERENCE_EYES_DIR = path.resolve("img/reference-eyes");
+const HOG_MODEL_PATH = new URL("./hogModel.json", import.meta.url);
 
 const TEMPLATE_SIZE = 32;
+// Longest-side sizes to scan at. With a 32px template these find an emoji
+// spanning roughly 4% (720) to 45% (72) of the frame.
 const FRAME_SCALES = [720, 540, 405, 304, 228, 171, 128, 96, 72];
-const WINDOW_STRIDE = 3;
+// Upscaling adds no detail, so skip scales well above the decoded frame (a
+// 240px gif no longer gets blown up to 720). 1.5 still covers emoji down to
+// about 9% of a small frame.
+const MAX_UPSCALE = 1.5;
 const MAX_COLOR_DISTANCE = 55;
 const WEAK_CORRELATION = 0.75;
 const MAX_COLOR_DISTANCE_STRICT = 25;
-const EARLY_EXIT_CORRELATION = 0.93;
 const MIN_FRAME_VARIANCE = 25;
+
+// Cascade: a HOG + linear model (hogModel.json, scripts/eyes-hog/train.ts)
+// proposes windows, then masked ZNCC + colour gates check every pixel within
+// VERIFY_RADIUS of the top proposals. The proposal threshold gives ~99.5%
+// recall on synthetic validation composites.
+const PROPOSAL_THRESHOLD = -1.7;
+const MAX_PROPOSALS = 40;
+const VERIFY_RADIUS = 4;
+// Checking every pixel near a peak finds higher correlations than a stride-3
+// scan would, for real eyes and look-alikes alike, so the proposal model also
+// gets a vote: corr + HOG_VOTE * proposal logit must reach COMBINED_THRESHOLD.
+// That vetoes skull/ghost-like look-alikes without losing weak real eyes.
+const HOG_VOTE = 0.02;
+const COMBINED_THRESHOLD = 0.83;
+// The SIMD pre-pass accumulates in f32, so it uses a slightly lower bar and
+// every candidate is re-scored in f64: decisions match the plain JS path.
+const WASM_CANDIDATE_MARGIN = 0.005;
 
 type EyeTemplate = {
 	name: string;
@@ -38,18 +68,55 @@ type EyeTemplate = {
 };
 
 const eyeTemplatesPromise = loadEyeTemplates();
+const hogModelPromise = loadHogModel();
+const scannerPromise = eyeTemplatesPromise
+	.then((templates) => new NeighbourhoodScanner(templates))
+	.catch((error: unknown) => {
+		// slower, but the same answers
+		console.error("[bot] eyes WASM kernel unavailable, using JS", error);
+		return null;
+	});
+if (VERIFY_RADIUS * 2 + 1 > MAX_NEIGHBOURHOOD) {
+	throw new Error(`VERIFY_RADIUS ${VERIFY_RADIUS} is too large`);
+}
+
+async function loadHogModel(): Promise<HogModel> {
+	const raw = JSON.parse(await readFile(HOG_MODEL_PATH, "utf8")) as {
+		weights: number[];
+		bias: number;
+	};
+	return modelFromVector(raw.weights, raw.bias);
+}
 
 export default async function detectEyesTask(
 	task: DetectionTask,
 ): Promise<EyeMatch | null> {
 	const templates = await eyeTemplatesPromise;
-	return detectEyesInMediaBytes(
+	await hogModelPromise;
+	const match = await detectEyesInMediaBytes(
 		task.bytes,
 		task.mediaKind,
 		task.sourceLabel,
 		templates,
 	);
+	if (match && !task.includeFrame) {
+		delete match.frame;
+	}
+	return match;
 }
+
+type FrameMatch = Pick<
+	EyeMatch,
+	"templateName" | "score" | "correlation" | "colorDistance"
+>;
+
+// a match plus where it was found, in the pyramid level's pixels
+type LocatedMatch = FrameMatch & {
+	x: number;
+	y: number;
+	levelWidth: number;
+	levelHeight: number;
+};
 
 async function detectEyesInMediaBytes(
 	bytes: Buffer,
@@ -57,185 +124,53 @@ async function detectEyesInMediaBytes(
 	sourceLabel: string,
 	templates: EyeTemplate[],
 ): Promise<EyeMatch | null> {
-	if (mediaKind === "image") {
-		const match = await frameContainsEyes(bytes, templates);
-		if (!match) {
-			return null;
-		}
-
-		return {
-			...match,
-			frameIndex: 0,
-		};
-	}
-
-	const workspace = await mkdtemp(path.join(tmpdir(), "eyes-check-"));
-	try {
-		const extension =
-			path.extname(sourceLabel.split("?")[0] ?? "") || ".bin";
-		const sourcePath = path.join(workspace, `source${extension}`);
-		await writeFile(sourcePath, bytes);
-
-		const frames = await extractAnimatedFrames(
-			sourcePath,
-			workspace,
-			MAX_VIDEO_FRAMES,
-		);
-
-		let bestMatch: EyeMatch | null = null;
-		for (let frameIndex = 0; frameIndex < frames.length; frameIndex += 1) {
-			const frame = frames[frameIndex];
-			if (!frame) {
-				continue;
-			}
-
-			const match = await frameContainsEyes(frame, templates);
-			if (
-				match &&
-				(!bestMatch || match.correlation > bestMatch.correlation)
-			) {
-				bestMatch = { ...match, frameIndex };
-				if (bestMatch.correlation >= EARLY_EXIT_CORRELATION) {
-					return bestMatch;
-				}
-			}
-		}
-
-		return bestMatch;
-	} finally {
-		await rm(workspace, { recursive: true, force: true });
-	}
-}
-
-async function extractAnimatedFrames(
-	sourcePath: string,
-	workspacePath: string,
-	maxFrames: number,
-): Promise<Buffer[]> {
-	const readFirstFrameFallback = async () => {
-		const fallbackFramePath = path.join(workspacePath, "frame_000.png");
-		await runFfmpeg([
-			"-v",
-			"error",
-			"-i",
-			sourcePath,
-			"-frames:v",
-			"1",
-			"-y",
-			fallbackFramePath,
-		]);
-		return [await readFile(fallbackFramePath)];
-	};
-
-	const durationSeconds = await probeMediaDuration(sourcePath);
-	if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-		return readFirstFrameFallback();
-	}
-
-	const timestamps = getEvenlySpacedTimestamps(durationSeconds, maxFrames);
-	const extractionResults = await Promise.all(
-		timestamps.map(async (timestamp, index) => {
-			if (timestamp === undefined) {
-				return null;
-			}
-
-			const outputPath = path.join(
-				workspacePath,
-				`frame_${index.toString().padStart(3, "0")}.png`,
-			);
-			await runFfmpeg([
-				"-v",
-				"error",
-				"-ss",
-				String(timestamp),
-				"-i",
-				sourcePath,
-				"-frames:v",
-				"1",
-				"-y",
-				outputPath,
-			]);
-			return outputPath;
-		}),
+	const media = await decodeMedia(
+		bytes,
+		mediaKind,
+		sourceLabel,
+		MAX_VIDEO_FRAMES,
 	);
+	let frameIndex = 0;
+	let result: EyeMatch | null = null;
 
-	const frameBuffers: Buffer[] = [];
-	for (const framePath of extractionResults) {
-		if (framePath === null) {
-			continue;
+	// frames stream in from ffmpeg; breaking out early stops the decode
+	for await (const frame of media.frames) {
+		const hit = await frameContainsEyes(frame, templates);
+		if (hit) {
+			result = toEyeMatch(hit, frame, frameIndex, media);
+			break;
 		}
-		try {
-			frameBuffers.push(await readFile(framePath));
-		} catch {
-			continue;
-		}
+		frameIndex += 1;
 	}
-
-	if (frameBuffers.length === 0) {
-		return readFirstFrameFallback();
-	}
-
-	return frameBuffers;
+	return result;
 }
 
-async function probeMediaDuration(sourcePath: string): Promise<number> {
-	const output = await runFfprobe([
-		"-v",
-		"error",
-		"-show_entries",
-		"format=duration",
-		"-of",
-		"default=noprint_wrappers=1:nokey=1",
-		sourcePath,
-	]);
-	return Number.parseFloat(output.trim());
-}
+function toEyeMatch(
+	hit: LocatedMatch,
+	frame: RgbFrame,
+	frameIndex: number,
+	media: DecodedMedia,
+): EyeMatch {
+	const sourceWidth = media.sourceWidth || frame.width;
+	const sourceHeight = media.sourceHeight || frame.height;
+	const scaleX = sourceWidth / hit.levelWidth;
+	const scaleY = sourceHeight / hit.levelHeight;
+	const { x, y, levelWidth, levelHeight, ...match } = hit;
+	void levelWidth;
+	void levelHeight;
 
-function runFfmpeg(args: string[]): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const process = spawn("ffmpeg", args);
-		let stderr = "";
-
-		process.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
-		});
-
-		process.on("error", reject);
-		process.on("close", (code) => {
-			if (code === 0) {
-				resolve();
-				return;
-			}
-
-			reject(new Error(`ffmpeg failed (${code}): ${stderr.trim()}`));
-		});
-	});
-}
-
-function runFfprobe(args: string[]): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const process = spawn("ffprobe", args);
-		let stdout = "";
-		let stderr = "";
-
-		process.stdout.on("data", (chunk: Buffer) => {
-			stdout += chunk.toString();
-		});
-
-		process.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
-		});
-
-		process.on("error", reject);
-		process.on("close", (code) => {
-			if (code === 0) {
-				resolve(stdout);
-				return;
-			}
-
-			reject(new Error(`ffprobe failed (${code}): ${stderr.trim()}`));
-		});
-	});
+	return {
+		...match,
+		frameIndex,
+		frame,
+		bbox: {
+			x: Math.round(x * scaleX),
+			y: Math.round(y * scaleY),
+			size: Math.round((TEMPLATE_SIZE * (scaleX + scaleY)) / 2),
+		},
+		sourceWidth,
+		sourceHeight,
+	};
 }
 
 async function loadEyeTemplates(): Promise<EyeTemplate[]> {
@@ -336,78 +271,233 @@ async function buildTemplate(
 }
 
 async function frameContainsEyes(
-	frameBuffer: Buffer,
+	frame: RgbFrame,
 	templates: EyeTemplate[],
-): Promise<Omit<EyeMatch, "frameIndex"> | null> {
-	const baseBuffer = await sharp(frameBuffer)
-		.ensureAlpha()
-		.flatten({ background: { r: 255, g: 255, b: 255 } })
-		.toBuffer();
+): Promise<LocatedMatch | null> {
+	const levels = await buildPyramid(frame);
+	const model = await hogModelPromise;
+	const scanner = await scannerPromise;
 
-	const scaledPromises = FRAME_SCALES.map((targetSize) => {
-		const promise = sharp(baseBuffer)
-			.resize({
-				width: targetSize,
-				height: targetSize,
-				fit: "inside",
-				withoutEnlargement: false,
-			})
-			.raw()
-			.toBuffer({ resolveWithObject: true });
-		promise.catch(() => {});
-		return promise;
-	});
+	const proposals: Proposal[] = [];
+	levels.forEach((level, levelIndex) =>
+		collectProposals(level, levelIndex, model, proposals),
+	);
+	proposals.sort((a, b) => b.score - a.score);
 
-	let bestMatch: Omit<EyeMatch, "frameIndex"> | null = null;
-
-	for (let i = 0; i < scaledPromises.length; i += 1) {
-		const scaled = await scaledPromises[i]!;
-		const { data, info } = scaled;
-		if (info.width < TEMPLATE_SIZE || info.height < TEMPLATE_SIZE) {
-			continue;
-		}
-
-		const match = scanFrameAtScale(
-			data,
-			info.width,
-			info.height,
-			info.channels,
+	for (const proposal of proposals.slice(0, MAX_PROPOSALS)) {
+		const level = levels[proposal.level]!;
+		const match = verifyAround(
+			level,
+			proposal.x,
+			proposal.y,
 			templates,
+			scanner,
 		);
-
 		if (
 			match &&
-			(!bestMatch || match.correlation > bestMatch.correlation)
+			match.correlation + HOG_VOTE * proposal.score >= COMBINED_THRESHOLD
 		) {
-			bestMatch = match;
-			if (bestMatch.correlation >= EARLY_EXIT_CORRELATION) {
-				return bestMatch;
+			return match;
+		}
+	}
+	return null;
+}
+
+/**
+ * Every scan size that fits the frame's upscale budget, each as RGB plus a
+ * luminance plane. Levels smaller than a template are useless and dropped.
+ */
+async function buildPyramid(frame: RgbFrame): Promise<ScaledLevel[]> {
+	const longest = Math.max(frame.width, frame.height);
+	let scales = FRAME_SCALES.filter((size) => size <= longest * MAX_UPSCALE);
+	if (scales.length === 0) {
+		scales = [Math.min(...FRAME_SCALES)];
+	}
+
+	const resized = await Promise.all(
+		scales.map((size) => resizeWithSharp(frame, size)),
+	);
+
+	return resized
+		.filter(
+			(level) =>
+				level.width >= TEMPLATE_SIZE && level.height >= TEMPLATE_SIZE,
+		)
+		.map((level) => ({
+			...level,
+			channels: 3,
+			lum: luminancePlane(level.rgb, level.width, level.height, 3),
+			offsets: null,
+		}));
+}
+
+async function resizeWithSharp(
+	frame: RgbFrame,
+	size: number,
+): Promise<RgbFrame> {
+	const { data, info } = await sharp(frame.rgb, {
+		raw: { width: frame.width, height: frame.height, channels: 3 },
+	})
+		.resize({ width: size, height: size, fit: "inside" })
+		.raw()
+		.toBuffer({ resolveWithObject: true });
+	return { width: info.width, height: info.height, rgb: data };
+}
+
+type ScaledLevel = {
+	rgb: Buffer;
+	width: number;
+	height: number;
+	channels: number;
+	lum: Float32Array;
+	offsets: Int32Array[] | null;
+};
+
+type Proposal = { score: number; level: number; x: number; y: number };
+
+function collectProposals(
+	level: ScaledLevel,
+	levelIndex: number,
+	model: HogModel,
+	out: Proposal[],
+) {
+	const map = computeHog(level.lum, level.width, level.height);
+	const { scores, positionsWide, positionsHigh } = scoreWindows(map, model);
+	for (let cy = 0; cy < positionsHigh; cy += 1) {
+		for (let cx = 0; cx < positionsWide; cx += 1) {
+			const score = scores[cy * positionsWide + cx]!;
+			if (score < PROPOSAL_THRESHOLD) {
+				continue;
+			}
+			// 3x3 non-maximum suppression on the cell grid
+			let isPeak = true;
+			for (let dy = -1; dy <= 1 && isPeak; dy += 1) {
+				const ny = cy + dy;
+				if (ny < 0 || ny >= positionsHigh) continue;
+				for (let dx = -1; dx <= 1; dx += 1) {
+					const nx = cx + dx;
+					if ((dx === 0 && dy === 0) || nx < 0 || nx >= positionsWide)
+						continue;
+					const neighbour = scores[ny * positionsWide + nx]!;
+					if (
+						neighbour > score ||
+						(neighbour === score &&
+							(dy < 0 || (dy === 0 && dx < 0)))
+					) {
+						isPeak = false;
+						break;
+					}
+				}
+			}
+			if (isPeak) {
+				out.push({
+					score,
+					level: levelIndex,
+					x: cx * HOG_CELL,
+					y: cy * HOG_CELL,
+				});
 			}
 		}
 	}
-
-	return bestMatch;
 }
 
-function scanFrameAtScale(
-	pixels: Buffer,
-	width: number,
-	height: number,
-	channels: number,
+function verifyAround(
+	level: ScaledLevel,
+	centerX: number,
+	centerY: number,
 	templates: EyeTemplate[],
-): Omit<EyeMatch, "frameIndex"> | null {
-	const pixelCount = width * height;
-	const frameLum = new Float32Array(pixelCount);
-	for (let i = 0; i < pixelCount; i += 1) {
-		const pi = i * channels;
-		frameLum[i] = rgbToLuminance(
-			pixels[pi]!,
-			pixels[pi + 1]!,
-			pixels[pi + 2]!,
-		);
+	scanner: NeighbourhoodScanner | null,
+): LocatedMatch | null {
+	const minX = Math.max(0, centerX - VERIFY_RADIUS);
+	const maxX = Math.min(level.width - TEMPLATE_SIZE, centerX + VERIFY_RADIUS);
+	const minY = Math.max(0, centerY - VERIFY_RADIUS);
+	const maxY = Math.min(
+		level.height - TEMPLATE_SIZE,
+		centerY + VERIFY_RADIUS,
+	);
+	if (!scanner) {
+		return bestMatchInRange(level, templates, minX, maxX, minY, maxY);
 	}
 
-	const templateOffsets = templates.map((template) => {
+	const { width, height, channels, rgb, lum } = level;
+	if (!level.offsets) {
+		level.offsets = templateOffsetsFor(templates, width);
+	}
+	const offsets = level.offsets;
+	let best: LocatedMatch | null = null;
+	scanner.scan(
+		lum,
+		width,
+		minX,
+		maxX,
+		minY,
+		maxY,
+		MIN_FRAME_VARIANCE,
+		WEAK_CORRELATION - WASM_CANDIDATE_MARGIN,
+		(t, x, y) => {
+			const match = matchTemplateAt(
+				rgb,
+				lum,
+				channels,
+				y * width + x,
+				templates[t]!,
+				offsets[t]!,
+			);
+			if (match && (!best || match.correlation > best.correlation)) {
+				best = {
+					...match,
+					x,
+					y,
+					levelWidth: width,
+					levelHeight: height,
+				};
+			}
+		},
+	);
+	return best;
+}
+
+function bestMatchInRange(
+	level: ScaledLevel,
+	templates: EyeTemplate[],
+	minX: number,
+	maxX: number,
+	minY: number,
+	maxY: number,
+): LocatedMatch | null {
+	const { width, height, channels, rgb, lum } = level;
+	if (!level.offsets) {
+		level.offsets = templateOffsetsFor(templates, width);
+	}
+	const offsets = level.offsets;
+
+	let best: LocatedMatch | null = null;
+	for (let y = minY; y <= maxY; y += 1) {
+		for (let x = minX; x <= maxX; x += 1) {
+			const match = evaluateWindow(
+				rgb,
+				lum,
+				channels,
+				y * width + x,
+				templates,
+				offsets,
+			);
+			if (match && (!best || match.correlation > best.correlation)) {
+				best = {
+					...match,
+					x,
+					y,
+					levelWidth: width,
+					levelHeight: height,
+				};
+			}
+		}
+	}
+	return best;
+}
+
+function templateOffsetsFor(templates: EyeTemplate[], width: number) {
+	return templates.map((template) => {
 		const offsets = new Int32Array(template.activeCount);
 		const { dx, dy, activeCount } = template;
 		for (let k = 0; k < activeCount; k += 1) {
@@ -415,59 +505,76 @@ function scanFrameAtScale(
 		}
 		return offsets;
 	});
+}
 
-	let best: Omit<EyeMatch, "frameIndex"> | null = null;
-	const maxY = height - TEMPLATE_SIZE;
-	const maxX = width - TEMPLATE_SIZE;
-
-	for (let y = 0; y <= maxY; y += WINDOW_STRIDE) {
-		const rowBase = y * width;
-		for (let x = 0; x <= maxX; x += WINDOW_STRIDE) {
-			const baseIndex = rowBase + x;
-			for (let t = 0; t < templates.length; t += 1) {
-				const template = templates[t]!;
-				const offsets = templateOffsets[t]!;
-				const correlation = computeMaskedZncc(
-					frameLum,
-					baseIndex,
-					template,
-					offsets,
-				);
-				if (correlation < WEAK_CORRELATION) {
-					continue;
-				}
-
-				const colorDistance = computeMeanColorDistance(
-					pixels,
-					channels,
-					baseIndex,
-					template,
-					offsets,
-				);
-
-				const strongMatch =
-					correlation >= EYES_DETECTION_THRESHOLD &&
-					colorDistance <= MAX_COLOR_DISTANCE;
-				const weakMatch =
-					correlation >= WEAK_CORRELATION &&
-					colorDistance <= MAX_COLOR_DISTANCE_STRICT;
-				if (!strongMatch && !weakMatch) {
-					continue;
-				}
-
-				if (!best || correlation > best.correlation) {
-					best = {
-						templateName: template.name,
-						correlation,
-						score: correlation,
-						colorDistance,
-					};
-				}
-			}
+function evaluateWindow(
+	pixels: Buffer,
+	frameLum: Float32Array,
+	channels: number,
+	baseIndex: number,
+	templates: EyeTemplate[],
+	templateOffsets: Int32Array[],
+): FrameMatch | null {
+	let best: FrameMatch | null = null;
+	for (let t = 0; t < templates.length; t += 1) {
+		const match = matchTemplateAt(
+			pixels,
+			frameLum,
+			channels,
+			baseIndex,
+			templates[t]!,
+			templateOffsets[t]!,
+		);
+		if (match && (!best || match.correlation > best.correlation)) {
+			best = match;
 		}
 	}
-
 	return best;
+}
+
+/** Masked ZNCC plus the colour gates for one template at one window. */
+function matchTemplateAt(
+	pixels: Buffer,
+	frameLum: Float32Array,
+	channels: number,
+	baseIndex: number,
+	template: EyeTemplate,
+	offsets: Int32Array,
+): FrameMatch | null {
+	const correlation = computeMaskedZncc(
+		frameLum,
+		baseIndex,
+		template,
+		offsets,
+	);
+	if (correlation < WEAK_CORRELATION) {
+		return null;
+	}
+
+	const colorDistance = computeMeanColorDistance(
+		pixels,
+		channels,
+		baseIndex,
+		template,
+		offsets,
+	);
+
+	const strongMatch =
+		correlation >= EYES_DETECTION_THRESHOLD &&
+		colorDistance <= MAX_COLOR_DISTANCE;
+	const weakMatch =
+		correlation >= WEAK_CORRELATION &&
+		colorDistance <= MAX_COLOR_DISTANCE_STRICT;
+	if (!strongMatch && !weakMatch) {
+		return null;
+	}
+
+	return {
+		templateName: template.name,
+		correlation,
+		score: correlation,
+		colorDistance,
+	};
 }
 
 function computeMaskedZncc(
@@ -538,8 +645,4 @@ function computeMeanColorDistance(
 	const dg = gSum / weightSum - meanG;
 	const db = bSum / weightSum - meanB;
 	return Math.sqrt(dr * dr + dg * dg + db * db);
-}
-
-function rgbToLuminance(r: number, g: number, b: number): number {
-	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
