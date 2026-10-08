@@ -14,8 +14,8 @@ export type MessageCardInput = {
 	timeZone?: string;
 };
 
-// Discord's dark theme
-const CARD_BACKGROUND = { r: 49, g: 51, b: 56, alpha: 1 };
+// Discord's dark theme chat background
+const CARD_BACKGROUND = { r: 26, g: 26, b: 30, alpha: 1 };
 const DEFAULT_NAME_COLOR = "#f2f3f5";
 const TIMESTAMP_COLOR = "#949ba4";
 const CONTENT_COLOR = "#dbdee1";
