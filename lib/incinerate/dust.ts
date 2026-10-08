@@ -27,7 +27,7 @@ const DRIFT_SHARE = 0.45;
 const DUST_COLOR = [92, 78, 66] as const;
 
 /**
- * "I don't feel so good." The card breaks into small flakes, swept from one
+ * The Thanos snap. The card breaks into small flakes, swept from one
  * side to the other, which drift off on the wind, browning to ash and
  * thinning out as they go.
  */

@@ -23,27 +23,20 @@ const LINGER_AFTER_EFFECT_MS = 1_500;
 // Discord API error for a message that no longer exists
 const UNKNOWN_MESSAGE = 10008;
 
+const CAPTION = "-# no 👀 detected";
+
 export const EFFECTS = {
-	burn: { render: renderBurn, caption: "-# no 👀 detected" },
-	dust: {
-		render: renderDust,
-		caption: "-# no 👀 detected. i don't feel so good",
-	},
-	melt: { render: renderMelt, caption: "-# no 👀 detected. rip and tear" },
-	crt: { render: renderCrt, caption: "-# no 👀 detected. signal lost" },
-	blackhole: {
-		render: renderBlackhole,
-		caption: "-# no 👀 detected. spaghettified",
-	},
+	burn: renderBurn,
+	dust: renderDust,
+	melt: renderMelt,
+	crt: renderCrt,
+	blackhole: renderBlackhole,
 } satisfies Record<
 	string,
-	{
-		render: (
-			card: RgbaImage,
-			options: Partial<EffectOptions>,
-		) => Promise<EffectAnimation>;
-		caption: string;
-	}
+	(
+		card: RgbaImage,
+		options: Partial<EffectOptions>,
+	) => Promise<EffectAnimation>
 >;
 
 export type EffectName = keyof typeof EFFECTS;
@@ -94,7 +87,7 @@ export async function incinerateMessage(
 	// Upload first, delete second: the animation opens on the intact message, so
 	// the swap looks seamless instead of leaving a gap while it uploads.
 	const sent: Message = await message.channel.send({
-		content: EFFECTS[effect].caption,
+		content: CAPTION,
 		files: [
 			new AttachmentBuilder(rendered.data, {
 				name: `incinerated.${rendered.format}`,
@@ -169,7 +162,7 @@ export async function renderMessageEffect(
 	});
 
 	// same message, same fire
-	return EFFECTS[effect].render(card, {
+	return EFFECTS[effect](card, {
 		seed: hashString(message.id ?? ""),
 		format: options.format,
 	});

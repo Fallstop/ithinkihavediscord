@@ -89,10 +89,10 @@ In the 👀 channel (by configured ID, else any channel named `eyes` or `👀`),
 - missives found to contain 👀 doth receive a 👀 reaction, recognising best-practice ocular alignment
 - missives found wanting are **incinerated**: the bot doth render a faithful likeness of the offending missive (avatar, name, role colour and all), posteth an animation of said likeness meeting its end, deleteth the original, and anon deleteth the animation too, leaving no trace most tidy. Fate doth choose the manner of departure, never the same twice running:
     - **burn**: consumed by a ragged front of flame, embers and all
-    - **dust**: "I don't feel so good"
+    - **dust**: crumbled to flakes upon the wind, as by a certain snap of the fingers
     - **melt**: rent asunder in the manner of a certain 1993 screen wipe
     - **crt**: switched off like a cathode-ray telly of yore
-    - **black hole**: spaghettified past the event horizon
+    - **black hole**: drawn past the event horizon
 - text-only missives are held to the 👀 standard as well: those without a 👀 (or an eye-themed custom emoji or sticker) are likewise incinerated, whilst pins, joins and other system notices are spared; set `config.eyes.filterTextMessages` to `false` to police media alone
 - shouldst the media fail to download or decode, the missive is spared, for we incinerate only upon certainty
 - the animations ship as animated WebP, a third the weight of GIF; set `config.eyes.effectFormat` to `gif` should any client prove obstinate
