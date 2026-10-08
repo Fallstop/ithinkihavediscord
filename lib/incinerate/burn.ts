@@ -106,6 +106,16 @@ export function* renderBurnFrames(
 			const pi = i * 4;
 			const s = front - igniteAt[i]!;
 
+			// only the message burns; empty card (or chat, when transparent)
+			// has nothing to set alight
+			if (source[pi + 3] === 0) {
+				out[pi] = 0;
+				out[pi + 1] = 0;
+				out[pi + 2] = 0;
+				out[pi + 3] = 0;
+				continue;
+			}
+
 			if (s < -SCORCH_BAND) {
 				out[pi] = source[pi]!;
 				out[pi + 1] = source[pi + 1]!;

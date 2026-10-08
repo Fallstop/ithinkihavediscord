@@ -60,7 +60,7 @@ export function* renderDustFrames(
 	const phase = new Float32Array(flakeCount);
 	// bare card background just vanishes; only text, avatar and media blow away
 	const isContent = new Uint8Array(flakeCount);
-	const background = [source[0]!, source[1]!, source[2]!];
+	const background = [source[0]!, source[1]!, source[2]!, source[3]!];
 
 	for (let fy = 0; fy < flakesY; fy += 1) {
 		for (let fx = 0; fx < flakesX; fx += 1) {
@@ -197,6 +197,13 @@ function flakeHasContent(
 	for (let oy = 0; oy < FLAKE_SIZE && y + oy < height; oy += 1) {
 		for (let ox = 0; ox < FLAKE_SIZE && x + ox < width; ox += 1) {
 			const pi = ((y + oy) * width + x + ox) * 4;
+			if (source[pi + 3] === 0) {
+				continue;
+			}
+			// on a transparent card anything visible is content
+			if (background[3] === 0) {
+				return true;
+			}
 			const difference =
 				Math.abs(source[pi]! - background[0]!) +
 				Math.abs(source[pi + 1]! - background[1]!) +

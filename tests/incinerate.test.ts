@@ -72,6 +72,33 @@ describe("incineration", () => {
 		});
 	}
 
+	it("burn sets fire to the message, not the empty card around it", () => {
+		const [width, height] = [400, 200];
+		const card = solidCard(width, height);
+		const isText = (pixel: number) => Math.floor(pixel / width) % 10 === 5;
+		// a transparent card: only the "text" rows are visible
+		for (let i = 0; i < width * height; i += 1) {
+			if (!isText(i)) {
+				card.data[i * 4 + 3] = 0;
+			}
+		}
+
+		for (const frame of renderBurnFrames(card, FAST_BURN)) {
+			let outside = 0;
+			for (let i = 0; i < width * height; i += 1) {
+				if (!isText(i) && frame[i * 4 + 3]! > 0) {
+					outside += 1;
+				}
+			}
+			// only drifting embers and ash; a flame front across the empty
+			// card would light up several percent of it
+			assert.ok(
+				outside / (width * height) < 0.01,
+				`${outside} px alight`,
+			);
+		}
+	});
+
 	it("burn only ever shrinks the card", () => {
 		const card = solidCard(120, 60);
 		const frames = Array.from(renderBurnFrames(card, FAST_BURN));

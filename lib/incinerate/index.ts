@@ -165,6 +165,7 @@ export async function renderMessageEffect(
 		media,
 		isEdited: Boolean(message.editedTimestamp),
 		timeZone: options.timeZone,
+		transparent: (options.format ?? "webp") === "webp",
 	});
 
 	// same message, same fire

@@ -12,10 +12,14 @@ export type MessageCardInput = {
 	media: Buffer | null;
 	isEdited?: boolean;
 	timeZone?: string;
+	// no backdrop, so the chat itself shows through (needs a format with
+	// real alpha; GIF's on/off transparency fringes the text)
+	transparent?: boolean;
 };
 
 // Discord's dark theme chat background
 const CARD_BACKGROUND = { r: 26, g: 26, b: 30, alpha: 1 };
+const TRANSPARENT = { ...CARD_BACKGROUND, alpha: 0 };
 const DEFAULT_NAME_COLOR = "#f2f3f5";
 const TIMESTAMP_COLOR = "#949ba4";
 const CONTENT_COLOR = "#dbdee1";
@@ -83,7 +87,7 @@ export async function renderMessageCard(
 			width: CARD_WIDTH,
 			height,
 			channels: 4,
-			background: CARD_BACKGROUND,
+			background: input.transparent ? TRANSPARENT : CARD_BACKGROUND,
 		},
 	})
 		.composite(composites)
