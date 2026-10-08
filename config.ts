@@ -59,8 +59,13 @@ export const config = {
 	},
 
 	eyes: {
-		// also burn text-only posts in the eyes channel that have no 👀 in them
-		filterTextMessages: false,
+		// burn text-only posts in the eyes channel that have no 👀 in them too;
+		// set false to only police media
+		filterTextMessages: true,
+
+		// "webp" (a third the size, animates inline) or "gif" for the
+		// incineration animations
+		effectFormat: "webp" as "webp" | "gif",
 
 		// timezone for the "Today at ..." stamp on the burning message card
 		timeZone: "Pacific/Auckland",

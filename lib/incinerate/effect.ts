@@ -6,6 +6,10 @@ export type RgbaImage = {
 	height: number;
 };
 
+// WebP is a third the size of GIF with real alpha, and Discord animates it
+// inline the same way; GIF is kept for anything that can't show WebP.
+export type AnimationFormat = "webp" | "gif";
+
 export type EffectOptions = {
 	fps: number;
 	// intact frames up front, so the swap from the real message is seamless
@@ -14,10 +18,12 @@ export type EffectOptions = {
 	// stragglers drifting off after the last of the card is gone
 	tailMs: number;
 	seed: number;
+	format?: AnimationFormat;
 };
 
-export type EffectGif = {
-	gif: Buffer;
+export type EffectAnimation = {
+	data: Buffer;
+	format: AnimationFormat;
 	durationMs: number;
 	frameCount: number;
 };
@@ -27,24 +33,59 @@ export type FrameEffect = (
 	options: EffectOptions,
 ) => Iterable<Buffer>;
 
-export async function renderEffectGif(
+export async function renderEffect(
 	card: RgbaImage,
 	effect: FrameEffect,
 	options: EffectOptions,
-): Promise<EffectGif> {
-	const gif = await encodeGif(
+): Promise<EffectAnimation> {
+	const format = options.format ?? "webp";
+	const encoded = await encodeAnimation(
 		effect(card, options),
 		card.width,
 		card.height,
 		options.fps,
+		format,
 	);
+	const data = format === "webp" ? holdFinalWebpFrame(encoded) : encoded;
 	const frameCount = getFrameCount(options);
 
 	return {
-		gif,
+		data,
+		format,
 		durationMs: Math.round((frameCount * 1000) / options.fps),
 		frameCount,
 	};
+}
+
+// the most a WebP frame duration can hold (24 bits of ms, about 4.6 hours)
+const MAX_WEBP_FRAME_MS = 0xffffff;
+
+/**
+ * Discord loops animated WebP whatever the file asks for (and ffmpeg asks for
+ * forever anyway), which would bring the message back from the dead. So mark
+ * it play-once and hold the empty final frame for as long as the format
+ * allows; the bot deletes it long before that runs out.
+ */
+export function holdFinalWebpFrame(webp: Buffer): Buffer {
+	const out = Buffer.from(webp);
+	let lastFrameAt = -1;
+	// RIFF header, then chunks: fourcc, little-endian size, padded payload
+	for (let offset = 12; offset + 8 <= out.length; ) {
+		const fourcc = out.toString("ascii", offset, offset + 4);
+		const size = out.readUInt32LE(offset + 4);
+		if (fourcc === "ANIM") {
+			// payload: background colour (4 bytes), then the loop count
+			out.writeUInt16LE(1, offset + 8 + 4);
+		} else if (fourcc === "ANMF") {
+			lastFrameAt = offset;
+		}
+		offset += 8 + size + (size & 1);
+	}
+	if (lastFrameAt >= 0) {
+		// ANMF payload: x, y, width-1, height-1 (3 bytes each), then duration
+		out.writeUIntLE(MAX_WEBP_FRAME_MS, lastFrameAt + 8 + 12, 3);
+	}
+	return out;
 }
 
 export function createRng(seed: number): () => number {
@@ -111,11 +152,37 @@ export function buildValueNoise(
 	return result;
 }
 
-export function encodeGif(
+const ENCODER_ARGS: Record<AnimationFormat, string[]> = {
+	webp: [
+		"-c:v",
+		"libwebp_anim",
+		"-pix_fmt",
+		"yuva420p",
+		"-quality",
+		"75",
+		"-f",
+		"webp",
+	],
+	gif: [
+		"-filter_complex",
+		"[0:v]split[a][b];[a]palettegen=max_colors=128:reserve_transparent=1:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle:alpha_threshold=128",
+		// play once, then sit on the empty last frame (for as long as GIF
+		// allows) until we delete it
+		"-loop",
+		"-1",
+		"-final_delay",
+		"65535",
+		"-f",
+		"gif",
+	],
+};
+
+export function encodeAnimation(
 	frames: Iterable<Buffer>,
 	width: number,
 	height: number,
 	fps: number,
+	format: AnimationFormat,
 ): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
 		const ffmpeg = spawn("ffmpeg", [
@@ -131,15 +198,7 @@ export function encodeGif(
 			String(fps),
 			"-i",
 			"pipe:0",
-			"-filter_complex",
-			"[0:v]split[a][b];[a]palettegen=max_colors=128:reserve_transparent=1:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle:alpha_threshold=128",
-			// play once, then sit on the empty last frame until we delete it
-			"-loop",
-			"-1",
-			"-final_delay",
-			"500",
-			"-f",
-			"gif",
+			...ENCODER_ARGS[format],
 			"pipe:1",
 		]);
 
@@ -157,7 +216,7 @@ export function encodeGif(
 			}
 			reject(
 				new Error(
-					`ffmpeg gif encode failed (${code}): ${stderr.trim()}`,
+					`ffmpeg ${format} encode failed (${code}): ${stderr.trim()}`,
 				),
 			);
 		});

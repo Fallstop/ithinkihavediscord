@@ -2,15 +2,21 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
 	getFrameCount,
+	renderBurn,
 	renderBurnFrames,
 	type BurnOptions,
 	type RgbaImage,
 } from "../lib/incinerate/burn.ts";
 import { discordMarkdownToPango } from "../lib/incinerate/card.ts";
+import { renderBlackholeFrames } from "../lib/incinerate/blackhole.ts";
+import { renderCrtFrames } from "../lib/incinerate/crt.ts";
 import { renderDustFrames } from "../lib/incinerate/dust.ts";
+import { renderMeltFrames } from "../lib/incinerate/melt.ts";
 import {
+	EFFECTS,
 	formatMessageContent,
 	incinerateMessage,
+	pickEffect,
 } from "../lib/incinerate/index.ts";
 import { createMockMessage } from "./mocks/message.ts";
 
@@ -49,6 +55,9 @@ describe("incineration", () => {
 	for (const [name, effect] of [
 		["burn", renderBurnFrames],
 		["dust", renderDustFrames],
+		["melt", renderMeltFrames],
+		["crt", renderCrtFrames],
+		["blackhole", renderBlackholeFrames],
 	] as const) {
 		it(`${name}: holds the intact card, then leaves nothing`, () => {
 			const card = solidCard(120, 60);
@@ -72,6 +81,35 @@ describe("incineration", () => {
 			// embers can flicker over burnt-out space, but never by much
 			assert.ok(coverage[i]! <= coverage[i - 1]! + 0.02);
 		}
+	});
+
+	it("picks effects at random, never the same twice running", () => {
+		const picks = Array.from({ length: 200 }, () => pickEffect());
+		for (let i = 1; i < picks.length; i += 1) {
+			assert.notEqual(picks[i], picks[i - 1]);
+		}
+		assert.deepEqual(new Set(picks), new Set(Object.keys(EFFECTS)));
+	});
+
+	it("encodes webp that plays once and parks on the empty last frame", async () => {
+		const { data, format } = await renderBurn(solidCard(64, 32), FAST_BURN);
+		assert.equal(format, "webp");
+		assert.equal(data.toString("ascii", 8, 12), "WEBP");
+
+		let loops = -1;
+		let lastFrameMs = -1;
+		for (let offset = 12; offset + 8 <= data.length; ) {
+			const fourcc = data.toString("ascii", offset, offset + 4);
+			const size = data.readUInt32LE(offset + 4);
+			if (fourcc === "ANIM") {
+				loops = data.readUInt16LE(offset + 12);
+			} else if (fourcc === "ANMF") {
+				lastFrameMs = data.readUIntLE(offset + 20, 3);
+			}
+			offset += 8 + size + (size & 1);
+		}
+		assert.equal(loops, 1);
+		assert.equal(lastFrameMs, 0xffffff);
 	});
 
 	it("is deterministic for a given seed", () => {
@@ -107,6 +145,28 @@ describe("incineration", () => {
 			discordMarkdownToPango("**bold** <b>not</b> & `code`"),
 			'<b>bold</b> &lt;b&gt;not&lt;/b&gt; &amp; <span font_family="monospace" background="#2b2d31">code</span>',
 		);
+	});
+
+	it("carries on if the original was deleted while rendering", async () => {
+		const events: string[] = [];
+		const message = createMockMessage({
+			author: { username: "someone" },
+			onDelete: () => {
+				throw Object.assign(new Error("Unknown Message"), {
+					code: 10008,
+				});
+			},
+			onSend: () => ({
+				delete: async () => {
+					events.push("delete burn");
+				},
+			}),
+		});
+
+		await incinerateMessage(message, {
+			scheduleCleanup: () => events.push("cleanup scheduled"),
+		});
+		assert.deepEqual(events, ["cleanup scheduled"]);
 	});
 
 	it("pulls the burn back down if the original can't be deleted", async () => {

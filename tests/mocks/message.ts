@@ -12,7 +12,8 @@ export type MockMessageOptions = {
 		video?: { url?: string };
 		url?: string;
 	}>;
-	stickers?: Array<{ url: string; format: number }>;
+	stickers?: Array<{ url: string; format: number; name?: string }>;
+	type?: number;
 	author?: { username: string; globalName?: string | null };
 	member?: { displayName: string; displayHexColor?: string };
 	mentions?: {
@@ -41,6 +42,7 @@ export function createMockMessage(
 	return {
 		id: options.id ?? "1234567890",
 		content: options.content ?? "hello",
+		type: options.type ?? 0,
 		createdAt: new Date("2026-10-08T07:42:00Z"),
 		editedTimestamp: null,
 		author: options.author

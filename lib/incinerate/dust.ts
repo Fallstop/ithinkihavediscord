@@ -1,5 +1,5 @@
 import {
-	type EffectGif,
+	type EffectAnimation,
 	type EffectOptions,
 	type RgbaImage,
 	buildValueNoise,
@@ -7,7 +7,7 @@ import {
 	getFrameCount,
 	hashUnit,
 	lerp,
-	renderEffectGif,
+	renderEffect,
 } from "./effect.ts";
 
 const DEFAULT_DUST_OPTIONS: EffectOptions = {
@@ -31,11 +31,11 @@ const DUST_COLOR = [92, 78, 66] as const;
  * side to the other, which drift off on the wind, browning to ash and
  * thinning out as they go.
  */
-export function renderDustGif(
+export function renderDust(
 	card: RgbaImage,
 	options: Partial<EffectOptions> = {},
-): Promise<EffectGif> {
-	return renderEffectGif(card, renderDustFrames, {
+): Promise<EffectAnimation> {
+	return renderEffect(card, renderDustFrames, {
 		...DEFAULT_DUST_OPTIONS,
 		...options,
 	});

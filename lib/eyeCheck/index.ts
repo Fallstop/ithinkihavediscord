@@ -1,3 +1,4 @@
+import { MessageType } from "discord.js";
 import { config } from "../../config.ts";
 import type { DiscordMessage } from "../messageTypes.ts";
 import { incinerateMessage } from "../incinerate/index.ts";
@@ -42,6 +43,11 @@ const MEDIA_ANIMATED_EXTENSIONS = new Set([
 	".mkv",
 	".avi",
 	".m4v",
+]);
+// people's posts; pins, joins, thread notices and the like are left alone
+const FILTERABLE_MESSAGE_TYPES = new Set<MessageType>([
+	MessageType.Default,
+	MessageType.Reply,
 ]);
 // Discord sticker formats: 1 png, 2 apng, 3 lottie, 4 gif
 const STICKER_FORMAT_KINDS = new Map<number, MediaKind>([
@@ -159,6 +165,19 @@ export function textContainsEyes(text: string): boolean {
 	return text.includes(EYES_EMOJI) || /<a?:[^:]*eye[^:]*:\d+>/i.test(text);
 }
 
+/** 👀 in the text, or a sticker we can't scan (lottie) that's named for it. */
+function messageTextHasEyes(message: DiscordMessage): boolean {
+	const stickers = Array.from(message.stickers?.values?.() ?? []);
+	return (
+		textContainsEyes(message.content ?? "") ||
+		stickers.some((sticker) => /eye|👀/i.test(sticker.name ?? ""))
+	);
+}
+
+function isUserPost(message: DiscordMessage): boolean {
+	return message.type == null || FILTERABLE_MESSAGE_TYPES.has(message.type);
+}
+
 export async function handleEyesMediaCheck(
 	message: DiscordMessage,
 ): Promise<boolean> {
@@ -174,15 +193,18 @@ export async function handleEyesMediaCheck(
 
 	if (targets.length === 0) {
 		if (
-			config.eyes.filterTextMessages &&
-			!textContainsEyes(message.content ?? "")
+			!config.eyes.filterTextMessages ||
+			!isUserPost(message) ||
+			messageTextHasEyes(message)
 		) {
-			await incinerateMessage(message, {
-				timeZone: config.eyes.timeZone,
-			});
-			return true;
+			return false;
 		}
-		return false;
+		console.log("[bot] text-only post without eyes, incinerating");
+		await incinerateMessage(message, {
+			timeZone: config.eyes.timeZone,
+			format: config.eyes.effectFormat,
+		});
+		return true;
 	}
 
 	const scanStartedAt = performance.now();
@@ -223,6 +245,7 @@ export async function handleEyesMediaCheck(
 					}
 				: null,
 		timeZone: config.eyes.timeZone,
+		format: config.eyes.effectFormat,
 	});
 	return true;
 }

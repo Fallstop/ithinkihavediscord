@@ -82,16 +82,24 @@ In the configured "happy" channel 😊, all missives are passed through an AI-po
 - missives of positive sentiment doth receive a 👍 reaction, reinforcing healthy community behaviours most wholesome 🌱
 - missives scoring below `0.2` are removed 🗑️ to safeguard the channel's net-promoter score most zealously 📊
 
-### 👀 Eyes channel — visual compliance & offboarding experience
+### Eyes channel — visual compliance & offboarding experience
 
-In the 👀 channel (by configured ID, else any channel named `eyes` or `👀`), every image, gif, video, sticker and tenor-style link embed is passed through our proprietary 👀-detection engine 🔬, a multi-scale template-matching pipeline most discerning 🧠:
+In the 👀 channel (by configured ID, else any channel named `eyes` or `👀`), every image, gif, video, sticker and tenor-style link embed is passed through our proprietary 👀-detection engine, a multi-scale template-matching pipeline most discerning:
 
-- missives found to contain 👀 doth receive a 👀 reaction, recognising best-practice ocular alignment 🏆
-- missives found wanting are **incinerated** 🔥: the bot doth render a faithful likeness of the offending missive (avatar, name, role colour and all 🪪), deleteth the original, and posteth a gif of said likeness burning into nothing (or, by fate's choosing, crumbling to dust 🫰), which it then also deleteth, leaving no trace most tidy 🧹
-- shouldst the media fail to download or decode, the missive is spared 🙏, for we incinerate only upon certainty
-- text-only missives are spared by default; set `config.eyes.filterTextMessages` to hold them, too, to the 👀 standard 📏
+- missives found to contain 👀 doth receive a 👀 reaction, recognising best-practice ocular alignment
+- missives found wanting are **incinerated**: the bot doth render a faithful likeness of the offending missive (avatar, name, role colour and all), posteth an animation of said likeness meeting its end, deleteth the original, and anon deleteth the animation too, leaving no trace most tidy. Fate doth choose the manner of departure, never the same twice running:
+    - **burn**: consumed by a ragged front of flame, embers and all
+    - **dust**: "I don't feel so good"
+    - **melt**: rent asunder in the manner of a certain 1993 screen wipe
+    - **crt**: switched off like a cathode-ray telly of yore
+    - **black hole**: spaghettified past the event horizon
+- text-only missives are held to the 👀 standard as well: those without a 👀 (or an eye-themed custom emoji or sticker) are likewise incinerated, whilst pins, joins and other system notices are spared; set `config.eyes.filterTextMessages` to `false` to police media alone
+- shouldst the media fail to download or decode, the missive is spared, for we incinerate only upon certainty
+- the animations ship as animated WebP, a third the weight of GIF; set `config.eyes.effectFormat` to `gif` should any client prove obstinate
 
-The bot requireth the **Manage Messages**, **Attach Files** and **Read Message History** permissions in that channel 🔐, and `ffmpeg` upon the host 🎞️ (the CapRover image doth install it, along with Noto fonts for rendering likenesses most true 🖋️).
+The `/eyescan` command doth let the cautious test their media beforehand, replying with the frame wherein the 👀 was found, boxed and scored.
+
+The bot requireth the **Manage Messages**, **Attach Files** and **Read Message History** permissions in that channel, and `ffmpeg` upon the host (the CapRover image doth install it, along with Noto fonts for rendering likenesses most true).
 
 ## Technology stack 🛠️
 

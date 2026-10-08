@@ -89,18 +89,53 @@ describe("eyes media checks", () => {
 		assert.equal(textContainsEyes("no eyes here :)"), false);
 	});
 
-	it("leaves text-only posts alone by default", async () => {
-		let deleted = false;
+	it("burns text-only posts without eyes", async () => {
+		const events: string[] = [];
 		const message = createMockMessage({
 			channelName: "eyes",
-			content: "no eyes, but text-only filtering is off",
+			content: "why did my post get deleted",
+			author: { username: "someone" },
 			onDelete: () => {
-				deleted = true;
+				events.push("delete");
+			},
+			onSend: () => {
+				events.push("send");
+				return { delete: async () => {} };
 			},
 		});
 
-		assert.equal(await handleEyesMediaCheck(message), false);
-		assert.equal(deleted, false);
+		assert.equal(await handleEyesMediaCheck(message), true);
+		assert.deepEqual(events, ["send", "delete"]);
+	});
+
+	it("spares text with eyes, eye stickers and system messages", async () => {
+		const spared = [
+			createMockMessage({ channelName: "eyes", content: "look 👀" }),
+			createMockMessage({
+				channelName: "eyes",
+				content: "",
+				stickers: [
+					{
+						url: "https://discord.com/stickers/1.json",
+						format: 3,
+						name: "Shifty Eyes",
+					},
+				],
+			}),
+			// someone pinned a message
+			createMockMessage({ channelName: "eyes", content: "", type: 6 }),
+		];
+
+		for (const message of spared) {
+			let deleted = false;
+			const watched = Object.assign(message, {
+				delete: async () => {
+					deleted = true;
+				},
+			});
+			assert.equal(await handleEyesMediaCheck(watched), false);
+			assert.equal(deleted, false);
+		}
 	});
 
 	it("locates the eyes and draws them on the matching frame", async () => {

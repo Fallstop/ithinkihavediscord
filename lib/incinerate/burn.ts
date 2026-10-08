@@ -1,5 +1,5 @@
 import {
-	type EffectGif,
+	type EffectAnimation,
 	type EffectOptions,
 	type RgbaImage,
 	buildValueNoise,
@@ -9,7 +9,7 @@ import {
 	getFrameCount,
 	hashUnit,
 	lerp,
-	renderEffectGif,
+	renderEffect,
 } from "./effect.ts";
 
 export type { EffectOptions as BurnOptions, RgbaImage };
@@ -62,11 +62,11 @@ type Particle = {
 	ash: boolean;
 };
 
-export function renderBurnGif(
+export function renderBurn(
 	card: RgbaImage,
 	options: Partial<EffectOptions> = {},
-): Promise<EffectGif> {
-	return renderEffectGif(card, renderBurnFrames, {
+): Promise<EffectAnimation> {
+	return renderEffect(card, renderBurnFrames, {
 		...DEFAULT_BURN_OPTIONS,
 		...options,
 	});

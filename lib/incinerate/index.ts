@@ -1,23 +1,39 @@
 import { AttachmentBuilder, type Message } from "discord.js";
 import type { DiscordMessage } from "../messageTypes.ts";
-import { renderBurnGif } from "./burn.ts";
+import { renderBlackhole } from "./blackhole.ts";
+import { renderBurn } from "./burn.ts";
 import { renderMessageCard } from "./card.ts";
-import { renderDustGif } from "./dust.ts";
-import type { EffectGif, EffectOptions, RgbaImage } from "./effect.ts";
+import { renderCrt } from "./crt.ts";
+import { renderDust } from "./dust.ts";
+import type {
+	AnimationFormat,
+	EffectAnimation,
+	EffectOptions,
+	RgbaImage,
+} from "./effect.ts";
+import { renderMelt } from "./melt.ts";
 import { extractPreviewFrame } from "./preview.ts";
 
-export { renderBurnGif, renderDustGif, renderMessageCard };
+export { renderMessageCard };
 
 const AVATAR_SIZE = 128;
 const FETCH_TIMEOUT_MS = 5_000;
-// leave the empty gif up briefly so slow clients still see the whole thing
+// leave the finished animation up briefly so slow clients see all of it
 const LINGER_AFTER_EFFECT_MS = 1_500;
+// Discord API error for a message that no longer exists
+const UNKNOWN_MESSAGE = 10008;
 
 export const EFFECTS = {
-	burn: { render: renderBurnGif, caption: "-# no 👀 detected" },
+	burn: { render: renderBurn, caption: "-# no 👀 detected" },
 	dust: {
-		render: renderDustGif,
+		render: renderDust,
 		caption: "-# no 👀 detected. i don't feel so good",
+	},
+	melt: { render: renderMelt, caption: "-# no 👀 detected. rip and tear" },
+	crt: { render: renderCrt, caption: "-# no 👀 detected. signal lost" },
+	blackhole: {
+		render: renderBlackhole,
+		caption: "-# no 👀 detected. spaghettified",
 	},
 } satisfies Record<
 	string,
@@ -25,34 +41,39 @@ export const EFFECTS = {
 		render: (
 			card: RgbaImage,
 			options: Partial<EffectOptions>,
-		) => Promise<EffectGif>;
+		) => Promise<EffectAnimation>;
 		caption: string;
 	}
 >;
 
 export type EffectName = keyof typeof EFFECTS;
+
+let lastEffect: EffectName | null = null;
 const MENTION_START = "\ue000";
 const MENTION_END = "\ue001";
 
 export type IncinerateOptions = {
 	// already-downloaded media to show on the card, so we don't fetch twice
 	media?: { bytes: Buffer; sourceLabel: string } | null;
-	// random (but stable per message) when not given
+	// webp unless told otherwise
+	format?: AnimationFormat;
+	// random when not given
 	effect?: EffectName;
 	timeZone?: string;
 	scheduleCleanup?: (cleanup: () => void, delayMs: number) => void;
 };
 
 /**
- * Replaces a message with a gif of itself burning away (or turning to dust),
- * then removes the gif once it has played. Falls back to a plain delete if
+ * Replaces a message with an animation of itself being destroyed (burnt,
+ * dusted, melted, switched off or swallowed by a black hole), then removes
+ * the animation once it has played. Falls back to a plain delete if
  * rendering fails, so a broken renderer never lets a message through.
  */
 export async function incinerateMessage(
 	message: DiscordMessage,
 	options: IncinerateOptions = {},
 ): Promise<void> {
-	const effect = options.effect ?? pickEffect(message.id ?? "");
+	const effect = options.effect ?? pickEffect();
 	const startedAt = performance.now();
 	const rendered = await renderMessageEffect(message, effect, options).catch(
 		(error) => {
@@ -70,12 +91,14 @@ export async function incinerateMessage(
 	}
 
 	const renderedAt = performance.now();
-	// Upload first, delete second: the gif opens on the intact message, so
+	// Upload first, delete second: the animation opens on the intact message, so
 	// the swap looks seamless instead of leaving a gap while it uploads.
 	const sent: Message = await message.channel.send({
 		content: EFFECTS[effect].caption,
 		files: [
-			new AttachmentBuilder(rendered.gif, { name: "incinerated.gif" }),
+			new AttachmentBuilder(rendered.data, {
+				name: `incinerated.${rendered.format}`,
+			}),
 		],
 		allowedMentions: { parse: [] },
 	});
@@ -83,34 +106,42 @@ export async function incinerateMessage(
 	try {
 		await message.delete();
 	} catch (error) {
-		// can't remove the original, so don't leave a fake funeral behind
-		await sent.delete().catch(() => {});
-		throw error;
+		// already gone (the author got there first) is as good as deleted
+		if ((error as { code?: number }).code !== UNKNOWN_MESSAGE) {
+			// can't remove the original, so don't leave a fake funeral behind
+			await sent.delete().catch(() => {});
+			throw error;
+		}
 	}
 	console.log(
-		`[bot] ${effect} sent: render ${Math.round(renderedAt - startedAt)}ms, upload+delete ${Math.round(performance.now() - renderedAt)}ms, ${(rendered.gif.length / 1024).toFixed(0)}KB`,
+		`[bot] ${effect} sent: render ${Math.round(renderedAt - startedAt)}ms, upload+delete ${Math.round(performance.now() - renderedAt)}ms, ${(rendered.data.length / 1024).toFixed(0)}KB ${rendered.format}`,
 	);
 
 	const schedule =
 		options.scheduleCleanup ??
-		((cleanup, delayMs) => void setTimeout(cleanup, delayMs));
+		// a pending cleanup shouldn't hold the process open on shutdown
+		((cleanup, delayMs) => void setTimeout(cleanup, delayMs).unref());
 	schedule(() => {
 		sent.delete().catch((error: unknown) => {
-			console.error("[bot] failed cleaning up incineration gif", error);
+			console.error("[bot] failed cleaning up incineration", error);
 		});
 	}, rendered.durationMs + LINGER_AFTER_EFFECT_MS);
 }
 
-export function pickEffect(messageId: string): EffectName {
-	const names = Object.keys(EFFECTS) as EffectName[];
-	return names[hashString(messageId) % names.length]!;
+/** A random effect, never the same one twice in a row. */
+export function pickEffect(random: () => number = Math.random): EffectName {
+	const names = (Object.keys(EFFECTS) as EffectName[]).filter(
+		(name) => name !== lastEffect,
+	);
+	lastEffect = names[Math.floor(random() * names.length)]!;
+	return lastEffect;
 }
 
 export async function renderMessageEffect(
 	message: DiscordMessage,
 	effect: EffectName,
 	options: IncinerateOptions = {},
-): Promise<EffectGif> {
+): Promise<EffectAnimation> {
 	const [avatar, media] = await Promise.all([
 		fetchAvatar(message),
 		options.media
@@ -137,7 +168,10 @@ export async function renderMessageEffect(
 	});
 
 	// same message, same fire
-	return EFFECTS[effect].render(card, { seed: hashString(message.id ?? "") });
+	return EFFECTS[effect].render(card, {
+		seed: hashString(message.id ?? ""),
+		format: options.format,
+	});
 }
 
 function hashString(text: string): number {
