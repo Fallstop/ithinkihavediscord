@@ -58,6 +58,14 @@ export const config = {
 		happyReactionEmoteId: "1489800033359364259",
 	},
 
+	eyes: {
+		// also burn text-only posts in the eyes channel that have no 👀 in them
+		filterTextMessages: false,
+
+		// timezone for the "Today at ..." stamp on the burning message card
+		timeZone: "Pacific/Auckland",
+	},
+
 	truthCheck: {
 		// random responses for true/false truth-check replies
 		trueResponses,

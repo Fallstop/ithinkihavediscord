@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
+import sharp from "sharp";
 import {
 	collectMediaTargetsFromMessage,
 	detectEyesInLocalMedia,
 	EYES_DETECTION_THRESHOLD,
 	getEvenlySpacedTimestamps,
+	handleEyesMediaCheck,
 	isEyesChannelMessage,
+	textContainsEyes,
 } from "../lib/eyeCheck/index.ts";
+import { drawMatch } from "../lib/eyeScan.ts";
 import { createMockMessage } from "./mocks/message.ts";
 
 describe("eyes media checks", () => {
@@ -49,6 +53,72 @@ describe("eyes media checks", () => {
 			},
 			{ url: "https://example.com/embedded.gif", kind: "animated" },
 		]);
+	});
+
+	it("scans one target per embed, preferring video over its thumbnail", () => {
+		const message = createMockMessage({
+			embeds: [
+				{
+					url: "https://tenor.com/view/eyes-123",
+					video: { url: "https://media.tenor.com/abc/eyes.mp4" },
+					thumbnail: { url: "https://media.tenor.com/abc/eyes.png" },
+				},
+			],
+			stickers: [
+				{
+					url: "https://media.discordapp.net/stickers/1.png",
+					format: 1,
+				},
+				{ url: "https://discord.com/stickers/2.json", format: 3 },
+			],
+		});
+
+		assert.deepEqual(collectMediaTargetsFromMessage(message), [
+			{ url: "https://media.tenor.com/abc/eyes.mp4", kind: "animated" },
+			{
+				url: "https://media.discordapp.net/stickers/1.png",
+				kind: "image",
+			},
+		]);
+	});
+
+	it("spots eyes in text, including custom eye emoji", () => {
+		assert.equal(textContainsEyes("look 👀"), true);
+		assert.equal(textContainsEyes("<:side_eye:123>"), true);
+		assert.equal(textContainsEyes("<a:EyesShaking:123>"), true);
+		assert.equal(textContainsEyes("no eyes here :)"), false);
+	});
+
+	it("leaves text-only posts alone by default", async () => {
+		let deleted = false;
+		const message = createMockMessage({
+			channelName: "eyes",
+			content: "no eyes, but text-only filtering is off",
+			onDelete: () => {
+				deleted = true;
+			},
+		});
+
+		assert.equal(await handleEyesMediaCheck(message), false);
+		assert.equal(deleted, false);
+	});
+
+	it("locates the eyes and draws them on the matching frame", async () => {
+		const match = await detectEyesInLocalMedia(
+			path.resolve(
+				"tests/fixtures/eyes/contains/seal-lets-take-a-look.mp4",
+			),
+			{ includeFrame: true },
+		);
+
+		assert.ok(match?.frame, "frame returned when asked for");
+		// the seal's eyes sit in the upper-middle of a 240x424 clip
+		assert.ok(match.bbox.x > 40 && match.bbox.x < 160);
+		assert.ok(match.bbox.y > 40 && match.bbox.y < 160);
+
+		const drawn = await sharp((await drawMatch(match))!).metadata();
+		assert.equal(drawn.width, match.frame.width);
+		assert.equal(drawn.height, match.frame.height);
 	});
 
 	it("returns five evenly spaced timestamps", () => {
